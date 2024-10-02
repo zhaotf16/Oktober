@@ -1,2 +1,5 @@
 *__pycache__/
 *.mrc
+*.egg-info/
+*.zarr
+.tox/
