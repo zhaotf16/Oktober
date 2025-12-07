@@ -5,7 +5,7 @@ from matplotlib.figure import Figure
 
 from oktober.io.mrc_loader import load_mrc
 from oktober.processing.filters import lowpass_fourier_3d
-from oktober.analysis.fft import power_spectrum_2d
+from oktober.analysis.spectrum import power_spectrum_2d
 from oktober.utils.plotting import auto_contrast
 
 
@@ -92,6 +92,11 @@ class OktoberViewer(QMainWindow):
 
         self.hide_sliders()
         self.figure.subplots_adjust(wspace=0.4)
+
+        # FSC drawer
+        self.btn_fsc = QPushButton("🔍 计算 FSC")
+        self.btn_fsc.clicked.connect(self.compute_fsc)
+        param_layout.addWidget(self.btn_fsc)
 
     def load_mrc_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -230,3 +235,62 @@ class OktoberViewer(QMainWindow):
 
     def hide_sliders(self):
         self.slider_z.hide(); self.slider_y.hide(); self.slider_x.hide()
+
+    def compute_fsc(self):
+        """加载两个 MRC 文件并计算 FSC"""
+        if self.data is None:
+            self.info_label.setText("⚠️ 请先加载第一个体积")
+            return
+
+        # 加载第二个文件
+        filepath2, _ = QFileDialog.getOpenFileName(
+            self, "选择第二个 MRC 文件（用于 FSC）", "", "MRC Files (*.mrc)"
+        )
+        if not filepath2:
+            return
+
+        try:
+            from oktober.io.mrc_loader import load_mrc
+            data2, _ = load_mrc(filepath2)
+
+            if data2.shape != self.data.shape:
+                raise ValueError("两个体积必须具有相同尺寸")
+
+            from oktober.analysis.spectrum import fsc_curve
+
+            res_A, fsc_vals = fsc_curve(self.data, data2, apix=self.apix_spinbox.value())
+
+            # 创建新窗口绘图
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+            from PyQt5.QtWidgets import QDialog, QVBoxLayout
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("FSC 曲线")
+            dialog.resize(800, 500)
+            layout = QVBoxLayout(dialog)
+
+            fig = Figure(figsize=(8, 4), dpi=100)
+            canvas = FigureCanvas(fig)
+            ax = fig.add_subplot(111)
+
+            ax.plot(res_A, fsc_vals, 'b-', lw=2, label='FSC')
+            ax.axhline(0.143, color='r', linestyle='--', label='0.143 标准')
+            ax.axhline(0.5, color='g', linestyle='--', label='0.5 标准')
+            ax.set_xlabel('分辨率 (Å)')
+            ax.set_ylabel('FSC')
+            ax.set_title(f'Fourier Shell Correlation\n数据: {self.info_label.text()} vs {filepath2.split("/")[-1]}')
+            ax.grid(True)
+            ax.legend()
+
+            # 反向 x 轴（高分辨率在左）
+            ax.set_xlim(right=0, left=max(res_A))
+
+            layout.addWidget(canvas)
+            dialog.setLayout(layout)
+            dialog.show()
+
+            self.fsc_dialog = dialog  # 防止被回收
+
+        except Exception as e:
+            self.info_label.setText(f"❌ FSC 计算失败: {str(e)}")
