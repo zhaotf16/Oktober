@@ -1,3 +1,4 @@
+import mrcfile
 import numpy as np
 
 def load_mrc(filepath):
