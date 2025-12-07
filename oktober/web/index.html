@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>Oktober - Web 风格查看器</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="qwebchannel.js"></script>
+</head>
+<body>
+
+  <div class="toolbar">
+    <button onclick="openMrc()">📁 打开 MRC 文件</button>
+    <span id="info">未加载文件</span>
+  </div>
+
+  <div class="grid-layout">
+    <div class="view-card xy-view">
+      <canvas id="xy-canvas"></canvas>
+      <div class="title">XY 平面 (Z=<span id="z-value">0</span>)</div>
+    </div>
+
+    <div class="view-card zx-view">
+      <canvas id="zx-canvas"></canvas>
+      <div class="title">ZX (Y=<span id="y-value">0</span>)</div>
+    </div>
+
+    <div class="view-card yz-view">
+      <canvas id="yz-canvas"></canvas>
+      <div class="title">YZ (X=<span id="x-value">0</span>)</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    Z: <input type="range" id="slider-z" min="0" max="199" value="100" oninput="onSliderChange()">
+    Y: <input type="range" id="slider-y" min="0" max="1999" value="1000" oninput="onSliderChange()">
+    X: <input type="range" id="slider-x" min="0" max="1999" value="1000" oninput="onSliderChange()">
+  </div>
+  <button onclick="drawTestImage()">🧪 画测试图</button>
+  <script src="viewer.js"></script>
+</body>
+</html>
