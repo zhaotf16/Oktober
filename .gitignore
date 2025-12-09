@@ -48,3 +48,5 @@ Thumbs.db
 
 *.mrc
 oktober/generate_mrc.py
+scripts/test_data/
+how_to_add_new_tab.md
