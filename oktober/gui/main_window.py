@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import mrcfile
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QFileDialog, QSizePolicy, QTabWidget,
-                            QVBoxLayout, QHBoxLayout, QWidget, QLabel, QStackedWidget,
+                            QVBoxLayout, QHBoxLayout, QWidget, QLabel, QStackedWidget, QMessageBox,
                             QSlider, QStatusBar, QSplitter, QAction, QGridLayout, QComboBox,
                             QGroupBox, QSpinBox, QPushButton, QProgressDialog, QCheckBox, QLineEdit)
 from PyQt5.QtCore import Qt
@@ -109,6 +109,9 @@ class MRCViewer(QMainWindow):
         self.projections_per_page = 100  # 每页显示的投影数
 
         self.display_mode = "tomogram"
+        self.edit_mode = False  # 编辑模式开关
+        self.pending_new_particle = None  # 待添加的新粒子
+        self.has_unsaved_changes = False  # 跟踪是否有未保存的更改
 
         self.init_ui()
         
@@ -141,6 +144,12 @@ class MRCViewer(QMainWindow):
         open_mrcs_action.triggered.connect(self.open_mrcs_file)
         file_menu.addAction(open_mrcs_action)
 
+
+        # 添加numpy标注文件菜单项
+        open_numpy_action = QAction('Open Numpy Annotation', self)
+        open_numpy_action.setShortcut('Ctrl+Shift+N')
+        open_numpy_action.triggered.connect(self.open_numpy_annotation)
+        file_menu.addAction(open_numpy_action)
         file_menu.addSeparator()
         
         exit_action = QAction('Exit', self)
@@ -446,21 +455,21 @@ class MRCViewer(QMainWindow):
         self.xy_section_display.setMinimumSize(150, 150)
         self.xy_section_display.setAlignment(Qt.AlignCenter)
         self.xy_section_display.setStyleSheet("")
-        
+        self.xy_section_display.mousePressEvent = self.on_xy_section_click
         # X-Z截面  
         self.xz_section_label = QLabel("X-Z Section")
         self.xz_section_display = QLabel()
         self.xz_section_display.setMinimumSize(150, 150)
         self.xz_section_display.setAlignment(Qt.AlignCenter)
         self.xz_section_display.setStyleSheet("")
-        
+        self.xz_section_display.mousePressEvent = self.on_xz_section_click
         # Y-Z截面
         self.yz_section_label = QLabel("Y-Z Section")
         self.yz_section_display = QLabel()
         self.yz_section_display.setMinimumSize(150, 150)
         self.yz_section_display.setAlignment(Qt.AlignCenter)
         self.yz_section_display.setStyleSheet("")
-        
+        self.yz_section_display.mousePressEvent = self.on_yz_section_click
         sections_layout.addWidget(self.xy_section_label)
         sections_layout.addWidget(self.xy_section_display)
         sections_layout.addWidget(self.xz_section_label)
@@ -472,6 +481,128 @@ class MRCViewer(QMainWindow):
         layout.addStretch()
         
         return area
+
+    def handle_section_click_precise(self, event, section_type):
+        """处理截面点击事件（精确微调）"""
+        if not self.edit_mode or self.selected_particle is None or self.current_data is None:
+            return
+            
+        # 获取点击位置
+        pos = event.pos()
+        click_x = pos.x()
+        click_y = pos.y()
+        
+        # 获取标签尺寸
+        if section_type == 'xy':
+            label = self.xy_section_display
+        elif section_type == 'xz':
+            label = self.xz_section_display
+        else:  # yz
+            label = self.yz_section_display
+            
+        label_width = label.width()
+        label_height = label.height()
+        
+        if label_width <= 0 or label_height <= 0:
+            return
+        
+        # 获取当前选中粒子的信息
+        particle_idx, particle = self.selected_particle
+        
+        try:
+            current_x = float(particle['_rlnCoordinateX'])
+            current_y = float(particle['_rlnCoordinateY'])
+            current_z = float(particle['_rlnCoordinateZ'])
+            
+            # 获取显示的截面数据范围（从display_particle_sections方法中获取）
+            # 这里需要知道当前显示的截面patch大小
+            
+            # 简单方案：假设显示的是固定大小的patch（比如64x64像素）
+            patch_size = 32  # 这应该与display_particle_sections中的一致
+            
+            # 计算点击相对于截面中心的偏移
+            center_offset_x = (click_x - label_width / 2)
+            center_offset_y = (click_y - label_height / 2)
+            
+            # 将像素偏移转换为实际坐标偏移（假设1:1映射或根据需要调整比例）
+            # 这里可以调整灵敏度
+            sensitivity = 1.0  # 可以调整这个值来控制微调的灵敏度
+            coord_offset_x = center_offset_x * sensitivity
+            coord_offset_y = center_offset_y * sensitivity
+            
+            # 根据截面类型计算新的坐标
+            if section_type == 'xy':
+                # XY截面：调整X和Y坐标
+                new_x = int(current_x + coord_offset_x)
+                new_y = int(current_y + coord_offset_y)
+                new_z = int(current_z)
+            elif section_type == 'xz':
+                # XZ截面：调整X和Z坐标
+                new_x = int(current_x + coord_offset_x)
+                new_y = int(current_y)
+                new_z = int(current_z + coord_offset_y)
+            else:  # yz
+                # YZ截面：调整Y和Z坐标
+                new_x = int(current_x)
+                new_y = int(current_y + coord_offset_x)
+                new_z = int(current_z + coord_offset_y)
+            
+            # 边界检查（基于实际数据尺寸）
+            if self.current_data is not None:
+                data_shape = self.current_data.shape
+                new_x = max(0, min(new_x, data_shape[2] - 1))
+                new_y = max(0, min(new_y, data_shape[1] - 1))
+                new_z = max(0, min(new_z, data_shape[0] - 1))
+            
+            # 更新粒子坐标
+            self.update_particle_coordinates(particle_idx, new_x, new_y, new_z)
+            
+            # 更新显示
+            self.update_display()
+            updated_particle = self.star_data.iloc[particle_idx]
+            self.display_particle_sections(updated_particle)
+            
+            self.status_bar.showMessage(f"Adjusted particle {particle_idx} by ({coord_offset_x:.1f}, {coord_offset_y:.1f})")
+            self.has_unsaved_changes = True
+            
+        except Exception as e:
+            self.status_bar.showMessage(f"Error adjusting coordinates: {str(e)}")
+            print(f"Error in section click: {e}")
+
+
+    def on_xy_section_click(self, event):
+        """处理XY截面点击"""
+        if not self.edit_mode or self.selected_particle is None:
+            return
+        self.handle_section_click_precise(event, 'xy')
+
+    def on_xz_section_click(self, event):
+        """处理XZ截面点击"""
+        if not self.edit_mode or self.selected_particle is None:
+            return
+        self.handle_section_click_precise(event, 'xz')
+
+    def on_yz_section_click(self, event):
+        """处理YZ截面点击"""
+        if not self.edit_mode or self.selected_particle is None:
+            return
+        self.handle_section_click_precise(event, 'yz')
+
+    # 添加更新粒子坐标的方法
+    def update_particle_coordinates(self, particle_idx, new_x, new_y, new_z):
+        """更新粒子坐标"""
+        if self.star_data is not None and 0 <= particle_idx < len(self.star_data):
+            self.star_data.at[particle_idx, '_rlnCoordinateX'] = str(new_x)
+            self.star_data.at[particle_idx, '_rlnCoordinateY'] = str(new_y)
+            self.star_data.at[particle_idx, '_rlnCoordinateZ'] = str(new_z)
+            
+            # 更新缓存
+            self.build_particle_cache()
+            
+            # 如果这是选中的粒子，更新选中粒子引用
+            if self.selected_particle and self.selected_particle[0] == particle_idx:
+                self.selected_particle = (particle_idx, self.star_data.iloc[particle_idx])
+
 
     def create_filter_controls(self):
         display_group = QGroupBox("Lowpass Control")
@@ -500,10 +631,27 @@ class MRCViewer(QMainWindow):
         particle_group = QGroupBox("Particle Control")
         particle_layout = QVBoxLayout(particle_group)
         
-        # 打开STAR文件按钮
-        open_star_btn = QPushButton("Open STAR File")
-        open_star_btn.clicked.connect(self.open_star_file)
+        # 统一的坐标文件操作组
+        coord_group = QGroupBox("Coordinate Files")
+        coord_layout = QVBoxLayout(coord_group)
         
+        # 读取坐标文件
+        open_coord_btn = QPushButton("Open Coordinate File")
+        open_coord_btn.clicked.connect(self.open_coordinate_file)
+        
+        # 保存坐标文件
+        save_coord_btn = QPushButton("Save Coordinate File")
+        save_coord_btn.clicked.connect(self.save_coordinate_file)
+        
+        # 坐标文件格式说明
+        format_label = QLabel("Supports: .star, .npy formats")
+        format_label.setStyleSheet("QLabel { font-size: 8pt; color: #666666; }")
+        
+        coord_layout.addWidget(open_coord_btn)
+        coord_layout.addWidget(save_coord_btn)
+        coord_layout.addWidget(format_label)
+        
+        particle_layout.addWidget(coord_group)
         # 显示粒子复选框
         self.show_particles_checkbox = QCheckBox("Show Particles")
         self.show_particles_checkbox.stateChanged.connect(self.toggle_particle_display)
@@ -518,12 +666,46 @@ class MRCViewer(QMainWindow):
 
         # 粒子计数标签
         self.particle_count_label = QLabel("No particles loaded")
+        # 编辑模式控件组
+        edit_group = QGroupBox("Edit Mode")
+        edit_layout = QVBoxLayout(edit_group)
         
-        particle_layout.addWidget(open_star_btn)
+        # 编辑模式开关
+        self.edit_mode_checkbox = QCheckBox("Enable Edit Mode")
+        self.edit_mode_checkbox.stateChanged.connect(self.toggle_edit_mode)
+        
+        # 编辑模式说明
+        edit_help = QLabel("In edit mode:\n- Click on main image to add/delete particles\n- Click on particle to select\n- Use controls below to modify")
+        edit_help.setStyleSheet("QLabel { font-size: 8pt; color: #666666; }")
+        edit_help.setWordWrap(True)
+        
+        # 粒子操作按钮
+        particle_ops_layout = QHBoxLayout()
+        self.add_particle_btn = QPushButton("Add")
+        self.add_particle_btn.clicked.connect(self.enable_add_particle_mode)
+        self.delete_particle_btn = QPushButton("Del")
+        self.delete_particle_btn.clicked.connect(self.delete_selected_particle)
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.clicked.connect(self.discard_changes)
+        self.save_changes_btn = QPushButton("Save Changes")
+        self.save_changes_btn.clicked.connect(self.save_particle_changes)
+        
+        particle_ops_layout.addWidget(self.add_particle_btn)
+        particle_ops_layout.addWidget(self.delete_particle_btn)
+        particle_ops_layout.addWidget(self.undo_btn)
+        
+        edit_layout.addWidget(self.edit_mode_checkbox)
+        edit_layout.addWidget(edit_help)
+        edit_layout.addLayout(particle_ops_layout)
+        edit_layout.addWidget(self.save_changes_btn)
+        
+        
         particle_layout.addWidget(self.show_particles_checkbox)
         particle_layout.addLayout(marker_size_layout)
         particle_layout.addWidget(self.particle_count_label)
-        
+        particle_layout.addWidget(edit_group)
+
+
         return particle_group
 
 
@@ -545,6 +727,24 @@ class MRCViewer(QMainWindow):
             except Exception as e:
                 self.status_bar.showMessage(f'Error loading file: {str(e)}')
                 print(f"Error: {e}")
+
+    def enable_add_particle_mode(self):
+        """启用添加粒子模式"""
+        if not self.edit_mode:
+            self.status_bar.showMessage("Please enable edit mode first")
+            return
+            
+        if self.pending_new_particle:
+            # 取消添加模式
+            self.pending_new_particle = False
+            self.add_particle_btn.setText("Add")
+            self.status_bar.showMessage("Cancelled particle addition mode")
+        else:
+            # 启用添加模式
+            self.pending_new_particle = True
+            self.add_particle_btn.setText("Cancel Add")
+            self.status_bar.showMessage("Click on main image to add new particle (Left-click to add, Right-click to delete)")
+
 
     def load_mrc_file_with_progress(self, filename):
         """带进度显示的MRC文件加载"""
@@ -570,25 +770,192 @@ class MRCViewer(QMainWindow):
         self.progress_dialog.show()
     
 
+    # 修改读取新STAR文件时的处理
     def open_star_file(self):
         """打开 STAR 坐标文件"""
         filename, _ = QFileDialog.getOpenFileName(
             self, 'Open STAR File', '', 'STAR Files (*.star);;All Files (*)')
         
         if filename:
-            try:
-                from oktober.io.star_parser import parse_star_file
-                self.star_data = parse_star_file(filename)
-                self.status_bar.showMessage(f'Loaded STAR file: {filename}, {len(self.star_data)} particles')
-                self.particle_count_label.setText(f"{len(self.star_data)} particles loaded")
-
-                # 构建粒子位置缓存
-                self.build_particle_cache()
+            # 如果正在编辑模式且有未保存更改，先处理
+            if self.edit_mode and self.has_unsaved_changes:
+                reply = QMessageBox.question(
+                    self, 'Unsaved Changes',
+                    'You have unsaved changes in current edit session. Load new file will discard them. Continue?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.No:
+                    return
             
-                print(f"STAR data columns: {list(self.star_data.columns)}")
-                print(f"First few rows:\n{self.star_data.head()}")
+            try:
+                from oktober.io import parse_star_file
+                self.star_data = parse_star_file(filename)
+                
+                # 如果在编辑模式，更新原始数据
+                if self.edit_mode:
+                    self.original_star_data = self.star_data.copy()
+                    self.has_unsaved_changes = False
+                
+                # 安全检查
+                if self.star_data is not None and not self.star_data.empty:
+                    self.particle_count_label.setText(f"Particles: {len(self.star_data)}")
+                    self.build_particle_cache()
+                    if self.display_mode == "tomogram":
+                        self.update_display()
+                else:
+                    self.particle_count_label.setText("Particles: 0")
+                    self.star_data = None
+                    
+                self.status_bar.showMessage(f'Loaded STAR file: {filename}')
+                
             except Exception as e:
+                self.star_data = None
+                self.particle_count_label.setText("Particles: 0")
+                QMessageBox.critical(self, 'Load Error', f'Error loading STAR file: {str(e)}')
                 self.status_bar.showMessage(f'Error loading STAR file: {str(e)}')
+                print(f"STAR file loading error: {e}")
+
+
+    # 具体的文件加载方法
+    def load_star_file(self, filename):
+        """加载STAR文件"""
+        from io.star_loader import parse_star_file
+        star_data = parse_star_file(filename)
+        
+        # 处理编辑模式下的数据保护
+        self.handle_data_loading_protection()
+        
+        # 更新数据
+        self.star_data = star_data
+        
+        # 如果在编辑模式，更新原始数据
+        if hasattr(self, 'edit_mode') and self.edit_mode:
+            if self.star_data is not None:
+                self.original_star_data = self.star_data.copy()
+            else:
+                self.original_star_data = None
+            self.has_unsaved_changes = False
+        
+        # 更新界面
+        self.update_coordinate_display()
+        self.status_bar.showMessage(f'Loaded STAR file: {filename}')
+
+    def load_numpy_file(self, filename):
+        """加载numpy文件"""
+        numpy_data = np.load(filename)
+        
+        # 验证数据格式
+        if len(numpy_data.shape) != 2:
+            raise ValueError("Numpy annotation must be 2D array")
+        
+        if numpy_data.shape[1] not in [6, 8]:
+            raise ValueError("Numpy annotation must have 6 or 8 columns")
+        
+        # 转换为STAR格式
+        star_data = self.convert_numpy_to_star(numpy_data)
+        
+        # 处理编辑模式下的数据保护
+        self.handle_data_loading_protection()
+        
+        # 更新数据
+        self.star_data = star_data
+        
+        # 如果在编辑模式，更新原始数据
+        if hasattr(self, 'edit_mode') and self.edit_mode:
+            if self.star_data is not None:
+                self.original_star_data = self.star_data.copy()
+            else:
+                self.original_star_data = None
+            self.has_unsaved_changes = False
+        
+        # 更新界面
+        self.update_coordinate_display()
+        self.status_bar.showMessage(f'Loaded numpy file: {filename}')
+
+
+    def auto_detect_and_load_file(self, filename):
+        """自动检测文件格式并加载"""
+        try:
+            # 首先尝试作为STAR文件加载
+            from io.star_loader import parse_star_file
+            star_data = parse_star_file(filename)
+            self.star_data = star_data
+            self.status_bar.showMessage(f'Auto-detected and loaded as STAR file: {filename}')
+        except:
+            # 如果失败，尝试作为numpy文件加载
+            try:
+                numpy_data = np.load(filename)
+                if len(numpy_data.shape) == 2 and numpy_data.shape[1] in [6, 8]:
+                    star_data = self.convert_numpy_to_star(numpy_data)
+                    self.star_data = star_data
+                    self.status_bar.showMessage(f'Auto-detected and loaded as numpy file: {filename}')
+                else:
+                    raise ValueError("Unknown file format")
+            except:
+                raise ValueError("Cannot detect file format or unsupported format")
+
+    # 数据保护处理
+    def handle_data_loading_protection(self):
+        """处理加载新数据时的编辑模式保护"""
+        if (hasattr(self, 'edit_mode') and self.edit_mode and 
+            hasattr(self, 'has_unsaved_changes') and self.has_unsaved_changes):
+            reply = QMessageBox.question(
+                self, 'Unsaved Changes',
+                'You have unsaved changes in current edit session. Loading new file will discard them. Continue?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.No:
+                raise Exception("User cancelled operation")
+
+
+    # 更新显示的统一方法
+    def update_coordinate_display(self):
+        """更新坐标显示"""
+        if self.star_data is not None and not self.star_data.empty:
+            self.particle_count_label.setText(f"Particles: {len(self.star_data)}")
+            self.build_particle_cache()
+            if self.display_mode == "tomogram":
+                self.update_display()
+        else:
+            self.particle_count_label.setText("Particles: 0")
+            self.star_data = None
+
+    # 具体的保存方法
+    def save_star_format(self, filename):
+        """保存为STAR格式"""
+        if self.star_data is None:
+            return
+            
+        # 创建STAR文件内容
+        with open(filename, 'w') as f:
+            f.write("# RELION; version 4.0\n\ndata_\n\nloop_\n")
+            
+            # 写入列头
+            for col in self.star_data.columns:
+                f.write(f"{col}\n")
+            
+            # 写入数据
+            for _, row in self.star_data.iterrows():
+                values = []
+                for col in self.star_data.columns:
+                    values.append(str(row[col]))
+                f.write("\t".join(values) + "\n")
+
+    def save_numpy_format(self, filename):
+        """保存为numpy格式"""
+        if self.star_data is None:
+            return
+            
+        # 转换为numpy格式
+        numpy_array = self.convert_star_to_numpy(self.star_data)
+        
+        # 保存numpy文件
+        np.save(filename, numpy_array)
+
 
     def build_particle_cache(self):
         """构建粒子位置缓存以加速查找"""
@@ -888,6 +1255,22 @@ class MRCViewer(QMainWindow):
         
         return img_rgb
 
+
+    def delete_selected_particle(self):
+        """删除选中的粒子"""
+        if not self.edit_mode:
+            self.status_bar.showMessage("Please enable edit mode first")
+            return
+            
+        if self.selected_particle is None:
+            self.status_bar.showMessage("No particle selected")
+            return
+            
+        # 从数据中删除粒子
+        particle_idx = self.selected_particle[0]
+        self.delete_particle_by_index(particle_idx)
+
+
     def highlight_selected_particle(self, img_array, particle):
         """高亮显示选中的粒子"""
         if len(img_array.shape) == 2:
@@ -956,9 +1339,10 @@ class MRCViewer(QMainWindow):
                             img_array[ny, nx] = color
 
 
+    # 修改鼠标点击处理来支持编辑模式
     def on_image_click(self, event):
-        """处理图像点击事件"""
-        if self.current_data is None or self.star_data is None:
+        """处理图像点击事件（支持编辑模式）"""
+        if self.current_data is None or self.display_mode != "tomogram":
             return
             
         # 获取点击位置
@@ -966,15 +1350,57 @@ class MRCViewer(QMainWindow):
         x = pos.x()
         y = pos.y()
         
-        print(f"Click position: ({x}, {y})")  # 调试信息
-        
         # 转换为图像坐标
         img_x, img_y = self.label_to_image_coords(x, y)
-        print(f"Image coordinates: ({img_x}, {img_y})")  # 调试信息
         
-        # 查找最近的粒子
-        result = self.find_nearest_particle(img_x, img_y, self.current_slice)
-        print(f"Found particle: {result is not None}")  # 调试信息
+        if self.edit_mode:
+            self.handle_edit_mode_click(img_x, img_y, event)
+        else:
+            # 原有的粒子选择逻辑
+            self.find_nearest_particle_optimized(img_x, img_y, self.current_slice)
+
+    def handle_edit_mode_click(self, img_x, img_y, event):
+        """处理编辑模式下的点击"""
+        if event.button() == Qt.RightButton:
+            # 右键总是用于删除操作
+            clicked_particle = self.find_nearest_particle_for_deletion(img_x, img_y, self.current_slice)
+            if clicked_particle:
+                self.delete_particle_by_index(clicked_particle[0])
+            return
+        
+        # 左键处理
+        if self.pending_new_particle:
+            # 添加新粒子
+            self.add_new_particle(img_x, img_y)
+            self.pending_new_particle = False
+            self.add_particle_btn.setText("Add")  # 恢复按钮文本
+        else:
+            # 检查是否点击了现有粒子
+            clicked_particle = self.find_nearest_particle_optimized(img_x, img_y, self.current_slice)
+            if not clicked_particle:
+                # 点击了空白区域 - 如果需要可以添加新粒子的提示
+                self.status_bar.showMessage("Click 'Add Particle' button first to add new particles")
+
+
+    def find_nearest_particle_for_deletion(self, click_x, click_y, click_z):
+        """专门用于删除操作的粒子查找"""
+        if not self.particle_positions:
+            return None
+            
+        min_distance = float('inf')
+        nearest_particle = None
+        marker_size = self.marker_size_spinbox.value() if hasattr(self, 'marker_size_spinbox') else 3
+        search_radius = max(marker_size * 2, 20)
+        
+        for idx, x, y, z, particle in self.particle_positions:
+            if abs(z - click_z) <= 2:
+                distance = np.sqrt((x - click_x)**2 + (y - click_y)**2)
+                if distance <= search_radius and distance < min_distance:
+                    min_distance = distance
+                    nearest_particle = (idx, particle)
+        
+        return nearest_particle
+
 
     def label_to_image_coords(self, label_x, label_y):
         """将标签坐标转换为图像坐标"""
@@ -1062,30 +1488,37 @@ class MRCViewer(QMainWindow):
         return None
 
 
+    # 修改 select_particle 方法来适应编辑模式
     def select_particle(self, index, particle):
         """选择粒子并显示详细信息"""
         self.selected_particle = (index, particle)
         
-        # 显示粒子信息
-        info_text = f"Particle Index: {index}\n"
-        info_text += f"X: {particle['_rlnCoordinateX']}\n"
-        info_text += f"Y: {particle['_rlnCoordinateY']}\n"
-        info_text += f"Z: {particle['_rlnCoordinateZ']}\n"
-        
-        if '_rlnAngleRot' in particle:
-            info_text += f"Rot: {particle['_rlnAngleRot']}\n"
-        if '_rlnAngleTilt' in particle:
-            info_text += f"Tilt: {particle['_rlnAngleTilt']}\n"
-        if '_rlnAnglePsi' in particle:
-            info_text += f"Psi: {particle['_rlnAnglePsi']}\n"
+        # 安全地显示粒子信息
+        try:
+            info_text = f"Particle Index: {index}\n"
+            info_text += f"X: {particle['_rlnCoordinateX']}\n"
+            info_text += f"Y: {particle['_rlnCoordinateY']}\n"
+            info_text += f"Z: {particle['_rlnCoordinateZ']}\n"
             
-        self.particle_info_label.setText(info_text)
+            for key in ['_rlnAngleRot', '_rlnAngleTilt', '_rlnAnglePsi']:
+                if key in particle:
+                    info_text += f"{key[4:]}: {particle[key]}\n"
+                    
+            if hasattr(self, 'particle_info_label'):
+                self.particle_info_label.setText(info_text)
+        except Exception as e:
+            print(f"Error displaying particle info: {e}")
         
         # 显示三个截面
-        self.display_particle_sections(particle)
+        try:
+            if hasattr(self, 'xy_section_display'):
+                self.display_particle_sections(particle)
+        except Exception as e:
+            print(f"Error displaying sections: {e}")
         
-        # 在主图像上高亮显示选中的粒子
-        self.update_display()
+        # 更新显示
+        if self.display_mode == "tomogram":
+            self.update_display()
 
     def display_particle_sections(self, particle):
         """显示粒子的三个截面"""
@@ -1352,6 +1785,427 @@ class MRCViewer(QMainWindow):
         self.current_projection_page = 0  # 回到第一页
         self.update_projection_display()
 
+
+    def toggle_edit_mode(self, state):
+        """切换编辑模式（带数据保护）"""
+        new_state = state == Qt.Checked
+        
+        # 如果要关闭编辑模式且有未保存的更改，弹出确认对话框
+        if not new_state and self.edit_mode and self.has_unsaved_changes:
+            reply = QMessageBox.question(
+                self, 'Unsaved Changes',
+                'You have unsaved changes. Do you want to save them before exiting edit mode?',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Cancel
+            )
+            
+            if reply == QMessageBox.Save:
+                # 保存更改
+                self.save_particle_changes()
+                if not self.has_unsaved_changes:  # 如果保存成功
+                    self.proceed_exit_edit_mode()
+                else:
+                    # 保存失败，保持编辑模式
+                    self.edit_mode_checkbox.setChecked(True)
+                    return
+            elif reply == QMessageBox.Discard:
+                # 放弃更改，恢复原始数据
+                self.discard_changes()
+                self.proceed_exit_edit_mode()
+            else:
+                # 取消操作，保持编辑模式
+                self.edit_mode_checkbox.setChecked(True)
+                return
+        elif new_state and not self.edit_mode:
+            # 进入编辑模式
+            self.enter_edit_mode()
+        elif not new_state and self.edit_mode:
+            # 关闭编辑模式（无未保存更改）
+            self.proceed_exit_edit_mode()
+
+    def enter_edit_mode(self):
+        """进入编辑模式"""
+        self.edit_mode = True
+        # 保存原始数据副本
+        if self.star_data is not None:
+            self.original_star_data = self.star_data.copy()
+        self.has_unsaved_changes = False
+        
+        self.status_bar.showMessage("Edit mode enabled: Left-click to select/add particles, Right-click to delete")
+        # 改变显示区域边框来指示编辑模式
+        self.tomogram_display.setStyleSheet("""
+            QLabel { 
+                border: 2px dashed #ff6b6b; 
+                background-color: transparent;
+            }
+        """)
+        # 确保粒子显示已开启
+        if not self.show_particles:
+            self.show_particles_checkbox.setChecked(True)
+
+    def proceed_exit_edit_mode(self):
+        """真正退出编辑模式"""
+        self.edit_mode = False
+        self.pending_new_particle = None
+        self.has_unsaved_changes = False
+        
+        self.status_bar.showMessage("Edit mode disabled")
+        # 恢复正常边框
+        self.tomogram_display.setStyleSheet("""
+            QLabel { 
+                border: 1px solid gray; 
+                background-color: transparent;
+            }
+        """)
+
+    def discard_changes(self):
+        """放弃更改，恢复原始数据"""
+        if self.original_star_data is not None:
+            self.star_data = self.original_star_data.copy()
+            self.build_particle_cache()
+            self.update_display()
+        self.has_unsaved_changes = False
+
+    # 修改添加/删除粒子的方法来标记更改
+    def add_new_particle(self, x, y):
+        """添加新粒子"""
+        if self.current_data is None:
+            return
+            
+        # 创建新粒子数据
+        new_particle_data = {
+            '_rlnCoordinateX': str(x),
+            '_rlnCoordinateY': str(y),
+            '_rlnCoordinateZ': str(self.current_slice),
+            '_rlnAngleRot': '0.0',
+            '_rlnAngleTilt': '0.0', 
+            '_rlnAnglePsi': '0.0'
+        }
+        
+        # 添加到数据中
+        import pandas as pd
+        new_row = pd.DataFrame([new_particle_data])
+        
+        if self.star_data is None:
+            self.star_data = new_row
+        else:
+            self.star_data = pd.concat([self.star_data, new_row], ignore_index=True)
+        
+        self.build_particle_cache()  # 重建缓存
+        self.update_display()
+        self.has_unsaved_changes = True  # 标记有未保存更改
+        self.status_bar.showMessage(f"Added new particle at ({x:.1f}, {y:.1f}, {self.current_slice})")
+
+    def delete_particle_by_index(self, index):
+        """根据索引删除粒子"""
+        if self.star_data is not None and index < len(self.star_data):
+            self.star_data = self.star_data.drop(index).reset_index(drop=True)
+            if self.selected_particle and self.selected_particle[0] == index:
+                self.selected_particle = None
+            self.build_particle_cache()
+            self.update_display()
+            self.has_unsaved_changes = True  # 标记有未保存更改
+            self.status_bar.showMessage(f"Deleted particle {index}")
+
+    # 修改保存方法
+    def save_particle_changes(self):
+        """保存粒子坐标更改"""
+        if self.star_data is None:
+            self.status_bar.showMessage("No particle data to save")
+            return
+            
+        # 弹出保存对话框
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 'Save Particle Coordinates', '', 'STAR Files (*.star);;All Files (*)')
+        
+        if filename:
+            try:
+                self.save_star_file(filename)
+                self.status_bar.showMessage(f"Saved particle coordinates to {filename}")
+                self.has_unsaved_changes = False  # 保存后清除更改标记
+                
+                # 询问是否继续编辑
+                reply = QMessageBox.question(
+                    self, 'Save Complete',
+                    'Changes saved successfully. Do you want to continue editing?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.No:
+                    self.edit_mode_checkbox.setChecked(False)
+                    
+            except Exception as e:
+                QMessageBox.critical(self, 'Save Error', f"Error saving file: {str(e)}")
+                self.status_bar.showMessage(f"Error saving file: {str(e)}")
+    def save_star_file(self, filename):
+        """保存STAR文件"""
+        if self.star_data is None:
+            return
+            
+        # 创建STAR文件内容
+        with open(filename, 'w') as f:
+            f.write("data_\n\nloop_\n")
+            
+            # 写入列头
+            for col in self.star_data.columns:
+                f.write(f"{col}\n")
+            
+            # 写入数据
+            for _, row in self.star_data.iterrows():
+                values = []
+                for col in self.star_data.columns:
+                    values.append(str(row[col]))
+                f.write("\t".join(values) + "\n")
+
+    # 添加窗口关闭事件处理
+    def closeEvent(self, event):
+        """窗口关闭事件"""
+        # 检查是否有未保存的编辑更改
+        if self.edit_mode and self.has_unsaved_changes:
+            reply = QMessageBox.question(
+                self, 'Unsaved Changes',
+                'You have unsaved changes in edit mode. Do you want to save them before closing?',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Cancel
+            )
+            
+            if reply == QMessageBox.Save:
+                self.save_particle_changes()
+                if not self.has_unsaved_changes:  # 如果保存成功
+                    event.accept()
+                else:
+                    # 保存失败，取消关闭
+                    event.ignore()
+            elif reply == QMessageBox.Discard:
+                event.accept()
+            else:
+                # 取消关闭
+                event.ignore()
+        else:
+            event.accept()
+
+    def open_numpy_annotation(self):
+        """打开numpy格式的标注文件"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 'Open Numpy Annotation File', '', 
+            'Numpy Files (*.npy);;All Files (*)')
+        
+        if filename:
+            try:
+                # 读取numpy文件
+                numpy_data = np.load(filename)
+                
+                # 验证数据格式
+                if len(numpy_data.shape) != 2:
+                    raise ValueError("Numpy annotation must be 2D array")
+                
+                if numpy_data.shape[1] not in [6, 8]:
+                    raise ValueError("Numpy annotation must have 6 or 8 columns")
+                
+                # 转换为STAR格式
+                star_data = self.convert_numpy_to_star(numpy_data)
+                
+                # 如果正在编辑模式且有未保存更改，先处理
+                if (hasattr(self, 'edit_mode') and self.edit_mode and 
+                    hasattr(self, 'has_unsaved_changes') and self.has_unsaved_changes):
+                    reply = QMessageBox.question(
+                        self, 'Unsaved Changes',
+                        'You have unsaved changes in current edit session. Load new file will discard them. Continue?',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No
+                    )
+                    
+                    if reply == QMessageBox.No:
+                        return
+                
+                # 更新数据
+                self.star_data = star_data
+                
+                # 如果在编辑模式，更新原始数据
+                if hasattr(self, 'edit_mode') and self.edit_mode:
+                    if self.star_data is not None:
+                        self.original_star_data = self.star_data.copy()
+                    else:
+                        self.original_star_data = None
+                    self.has_unsaved_changes = False
+                
+                # 更新界面
+                if self.star_data is not None and not self.star_data.empty:
+                    self.particle_count_label.setText(f"Particles: {len(self.star_data)}")
+                    self.build_particle_cache()
+                    if self.display_mode == "tomogram":
+                        self.update_display()
+                else:
+                    self.particle_count_label.setText("Particles: 0")
+                    self.star_data = None
+                    
+                self.status_bar.showMessage(f'Loaded numpy annotation file: {filename}')
+                
+            except Exception as e:
+                QMessageBox.critical(self, 'Load Error', f'Error loading numpy annotation file: {str(e)}')
+                self.status_bar.showMessage(f'Error loading numpy file: {str(e)}')
+                print(f"Numpy file loading error: {e}")
+
+    def convert_numpy_to_star(self, numpy_data):
+        """将numpy数组转换为STAR格式"""
+        import pandas as pd
+        
+        # 解析numpy数据
+        if numpy_data.shape[1] == 8:
+            # 8列格式: z1,z2,y1,y2,x1,x2,class,confidence
+            z1, z2, y1, y2, x1, x2, class_col, confidence = numpy_data.T
+        elif numpy_data.shape[1] == 6:
+            # 6列格式: z1,z2,y1,y2,x1,x2
+            z1, z2, y1, y2, x1, x2 = numpy_data.T
+            class_col = np.ones(len(numpy_data))  # 默认类别为1
+            confidence = np.ones(len(numpy_data))  # 默认置信度为1
+        else:
+            raise ValueError("Unsupported numpy array format")
+        
+        # 计算中心坐标（使用框的中心）
+        z_center = (z1 + z2) / 2
+        y_center = (y1 + y2) / 2
+        x_center = (x1 + x2) / 2
+        
+        # 创建STAR数据结构
+        star_dict = {
+            '_rlnCoordinateX': x_center.astype(str),
+            '_rlnCoordinateY': y_center.astype(str),
+            '_rlnCoordinateZ': z_center.astype(str),
+            '_rlnAngleRot': ['0.0'] * len(numpy_data),
+            '_rlnAngleTilt': ['0.0'] * len(numpy_data),
+            '_rlnAnglePsi': ['0.0'] * len(numpy_data),
+            '_rlnClassNumber': class_col.astype(str)
+        }
+        
+        # 如果有置信度信息，添加到STAR文件中
+        if numpy_data.shape[1] == 8:
+            star_dict['_rlnAutopickFigureOfMerit'] = confidence.astype(str)
+        
+        # 创建DataFrame
+        star_df = pd.DataFrame(star_dict)
+        
+        return star_df
+
+    # 添加保存为numpy格式的功能
+    def save_as_numpy_annotation(self):
+        """保存为numpy格式的标注文件"""
+        if self.star_data is None:
+            self.status_bar.showMessage("No particle data to save")
+            return
+        
+        # 弹出保存对话框
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 'Save as Numpy Annotation', '', 'Numpy Files (*.npy);;All Files (*)')
+        
+        if filename:
+            try:
+                # 转换为numpy格式
+                numpy_array = self.convert_star_to_numpy(self.star_data)
+                
+                # 保存numpy文件
+                np.save(filename, numpy_array)
+                
+                self.status_bar.showMessage(f"Saved numpy annotation to {filename}")
+                
+                # 如果在编辑模式，清除未保存标记
+                if self.edit_mode:
+                    self.has_unsaved_changes = False
+                    
+            except Exception as e:
+                QMessageBox.critical(self, 'Save Error', f"Error saving numpy file: {str(e)}")
+                self.status_bar.showMessage(f"Error saving numpy file: {str(e)}")
+    def convert_star_to_numpy(self, star_data):
+        """将STAR数据转换为numpy数组格式（6列：z1,z2,y1,y2,x1,x2）"""
+        # 提取坐标
+        x_center = star_data['_rlnCoordinateX'].astype(float)
+        y_center = star_data['_rlnCoordinateY'].astype(float)
+        z_center = star_data['_rlnCoordinateZ'].astype(float)
+        
+        # 假设固定的框大小（可以根据需要调整）
+        box_size = 16  # 16x16x16的框
+        
+        # 计算框的边界
+        x1 = x_center - box_size/2
+        x2 = x_center + box_size/2
+        y1 = y_center - box_size/2
+        y2 = y_center + box_size/2
+        z1 = z_center - box_size/2
+        z2 = z_center + box_size/2
+        
+        # 创建numpy数组
+        numpy_array = np.column_stack([z1, z2, y1, y2, x1, x2])
+        
+        # 如果STAR数据中有类别或置信度信息，可以扩展到8列
+        if '_rlnClassNumber' in star_data.columns:
+            class_col = star_data['_rlnClassNumber'].astype(float)
+            if '_rlnAutopickFigureOfMerit' in star_data.columns:
+                confidence = star_data['_rlnAutopickFigureOfMerit'].astype(float)
+                numpy_array = np.column_stack([z1, z2, y1, y2, x1, x2, class_col, confidence])
+            else:
+                confidence = np.ones(len(star_data))  # 默认置信度
+                numpy_array = np.column_stack([z1, z2, y1, y2, x1, x2, class_col, confidence])
+        
+        return numpy_array
+
+    # 统一的读取坐标文件方法
+    def open_coordinate_file(self):
+        """打开坐标文件（支持STAR和numpy格式）"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 'Open Coordinate File', '', 
+            'Coordinate Files (*.star *.npy);;STAR Files (*.star);;Numpy Files (*.npy);;All Files (*)')
+        
+        if filename:
+            try:
+                # 根据文件扩展名判断格式
+                if filename.endswith('.star'):
+                    self.load_star_file(filename)
+                elif filename.endswith('.npy'):
+                    self.load_numpy_file(filename)
+                else:
+                    # 尝试自动检测格式
+                    self.auto_detect_and_load_file(filename)
+                    
+            except Exception as e:
+                QMessageBox.critical(self, 'Load Error', f'Error loading coordinate file: {str(e)}')
+                self.status_bar.showMessage(f'Error loading file: {str(e)}')
+                print(f"Coordinate file loading error: {e}")
+
+    # 统一的保存坐标文件方法
+    def save_coordinate_file(self):
+        """保存坐标文件（支持多种格式）"""
+        if self.star_data is None:
+            self.status_bar.showMessage("No particle data to save")
+            return
+        
+        # 弹出保存对话框，让用户选择格式
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self, 'Save Coordinate File', '', 
+            'STAR Files (*.star);;Numpy Files (*.npy);;All Files (*)')
+        
+        if filename:
+            try:
+                # 根据选择的过滤器或文件扩展名确定格式
+                if selected_filter == 'STAR Files (*.star)' or filename.endswith('.star'):
+                    self.save_star_format(filename)
+                elif selected_filter == 'Numpy Files (*.npy)' or filename.endswith('.npy'):
+                    self.save_numpy_format(filename)
+                else:
+                    # 默认保存为STAR格式
+                    if not filename.endswith(('.star', '.npy')):
+                        filename += '.star'
+                    self.save_star_format(filename)
+                    
+                self.status_bar.showMessage(f"Saved coordinate file to {filename}")
+                
+                # 如果在编辑模式，清除未保存标记
+                if self.edit_mode:
+                    self.has_unsaved_changes = False
+                    
+            except Exception as e:
+                QMessageBox.critical(self, 'Save Error', f"Error saving coordinate file: {str(e)}")
+                self.status_bar.showMessage(f"Error saving file: {str(e)}")
 
 
 def main():

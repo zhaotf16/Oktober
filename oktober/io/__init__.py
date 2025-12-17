@@ -1,0 +1,1 @@
+from .star_parser import parse_star_file
